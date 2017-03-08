@@ -1,0 +1,162 @@
+#!/usr/bin/python
+#-*-coding:utf8-*-
+
+import urllib2
+import json
+import time
+import sys
+import threading
+import socket
+import os
+from OKTrader import *
+from utils import *
+from SqliteUtils import *
+from CalculateParams import *
+from OkcoinInfos import *
+
+
+kListenTime = 5
+kOrderWaitTime = 10
+kDBFileName = 'btc_cny.db'
+kLineFileName = 'kline.db'
+
+gLastPrice = 0
+gSysTime = 0
+gBollMean = 0
+gBollStd = 0
+gPriceRefreshed = False
+gKLineRefreshed = False
+
+gMutex = threading.Lock()
+
+class ReqListener():
+	def __init__(self, api_key, api_secret, symbol, port):
+#这里, port是指监听端口
+		self.trader = OKTrader(api_key, api_secret, symbol)
+		self.port = port
+		return None
+
+	def ParseSocketInfo(self, msg):
+		"""
+		格式为: buy_amt_price
+		"""
+		cols = msg.split('_')
+		bsflag = cols[0]
+		amt = float(cols[1])
+		price = float(cols[2])
+		return bsflag, amt, price
+	
+	def thread_func(self, order_id):
+		time.sleep(kOrderWaitTime)
+		self.trader.cancel_order(order_id)
+		return True
+
+#TODO: 还有一些
+
+	def ProcessSocketInfo(self, msg):
+		global gMutex, gPriceRefreshed, gKLineRefreshed, gLastPrice, gBollStd, gBollMean
+		if msg=='newprice':
+			flag = False
+			msg_back = ''
+			while flag == False:
+				gMutex.acquire(1)
+				flag = gPriceRefreshed
+				gMutex.release()
+				time.sleep(0.05)
+			gMutex.acquire()
+			msg = str(gLastPrice)
+			gPriceRefreshed = False
+			if gKLineRefreshed:
+				msg += '_%f_%f' %(gBollMean, gBollStd)
+				gKLineRefreshed = False
+			gMutex.release()
+			return msg
+		bsflag, amt, price = self.ParseSocketInfo(msg)
+		order_id = self.trader.trade(bsflag, price, amt)
+		t = threading.Thread(target=self.thread_func, args=(order_id,))
+		t.setDaemon(True)
+		t.start()
+		return str(order_id)
+
+	def Run(self):
+		sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		sock.bind(('localhost', self.port))
+		sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+		sock.listen(kListenTime)
+		while True:
+#			1print 'waiting connection...'
+			connection, address = sock.accept()
+#			print 'connection accepted from address:', address
+			try:
+				connection.settimeout(kListenTime)
+				msg = connection.recv(1024)
+				msg_back = self.ProcessSocketInfo(msg)
+				connection.send(msg_back)
+			except socket.timeout:
+				print 'time out'
+			connection.close()
+
+class DataGetter():
+	def __init__(self, DBFileName, symbol):
+		os.system('mv %s ./database_baks/%s_bak_%d' % (DBFileName, DBFileName,int(time.time())))
+		self.db_file_name = DBFileName
+		self.dbwriter = DBWriter(DBFileName)
+		self.dbwriter.Execute('create table id_time_price(id INT, time INT, price FLOAT)')
+		self.dbwriter.Execute('create table kline_1min(id INT, time INT, close FLOAT, high FLOAT, low FLOAT, vol FLOAT, kKDJ FLOAT, dKDJ FLOAT, jKDJ FLOAT, dif FLOAT, dea FLOAT, macd FLOAT, boll_mean FLOAT, boll_std FLOAT)')
+		self.symbol = symbol
+		return None
+
+	def WriteTicker(self, num):
+		global gLastPrice, gSysTime, gPriceRefreshed
+		gPriceRefreshed = True
+		self.dbwriter.Execute('insert into id_time_price values(%d,%d,%.2f)'%(num,gSysTime,gLastPrice))
+		return True
+
+	def WriteKLine(self, num):
+		global gBollStd, gBollMean, gKLineRefreshed, gSysTime
+		kline_time = 0
+		while gSysTime - kline_time > 50:
+			kline_data, gBollMean, gBollStd = CalcuBoll(self.symbol, '1min')
+			kline_time = int(kline_data[-1][0])/1000
+		kline_close = float(kline_data[-1][4])
+		kline_high = float(kline_data[-1][2])
+		kline_low = float(kline_data[-1][3])
+		kline_vol = float(kline_data[-1][5])
+		gKLineRefreshed = True
+		self.dbwriter.Execute('insert into kline_1min(id, time, close, high, low, vol, boll_mean, boll_std) values(%d,%d,%.2f,%.2f,%.2f,%.2f,%f,%f)'%(num,kline_time,kline_close, kline_high, kline_low, kline_vol, gBollMean, gBollStd))
+		return True
+
+	def Run(self):
+		global gLastPrice, gSysTime, gBollMean, gBollStd, gPriceRefreshed, gKLineRefreshed, gMutex
+		num_price = 0
+		num_kline = 0
+		lSysTime = 0
+		kline_last_time = int(time.time())
+		while True:
+			data = False
+			while data == False:
+				data = RefreshLastPrice(self.symbol)
+# 加锁
+			gMutex.acquire(5)
+			gSysTime = int(data['date'])
+			gLastPrice = float(data['ticker']['last'])
+			print gLastPrice
+			num_price += 1
+# 如果时间到了新的一分钟, 就更新k线信息
+			if gSysTime % 60>=2 and gSysTime%60<=10 and gSysTime-kline_last_time>45:
+				self.WriteKLine(num_kline)
+				num_kline += 1
+				kline_last_time = gSysTime
+			self.WriteTicker(num_price)
+#解锁
+			gMutex.release()
+			time.sleep(0.2)
+
+if __name__=='__main__':
+	listener = ReqListener(kApiKey, kSecretKey, 'btc_cny', 46587)
+	data_getter = DataGetter(kDBFileName, 'btc_cny')
+	t1 = threading.Thread(target=listener.Run)
+	t1.setDaemon(True)
+	t1.start()
+	data_getter.Run()
+

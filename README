@@ -1,0 +1,45 @@
+------------------------
+程序当前运行方法是
+
+1. 修改文件 OkcoinInfos.py中的变量 kApiKey和kSecretKey, 填入okcoin.cn给用户分配的api_key和secret_key(注: 这一步十分重要!! 否则, 若一个账号同时被两个人使用, 就会混乱掉!!)
+
+2. python ReqListener.py
+3. python main.py
+4. 躺着数钱
+
+
+其中,
+ReqListener.py的职责有二, 一个线程负责监听买卖信息并向交易所报单, 另一个线程读取最新行情并写入数据库
+main.py就是单线程: 刷新行情, 如果达到了交易条件, 就交易, 并及时更新各项指标.
+
+------------------------
+几个必须的文件:
+
+CalculateParams.py 给出数据库的名字之后, 该脚本能够读取数据库, 计算bollin线的值
+OKTrader.py 负责和okcoin交易的接口
+OkcoinInfos.py 只存储了api_key和secret_key
+ReqListener.py 有两个类: 监听信息并交易, 以及写入数据库
+SqliteUtils.py 读写数据库的类
+utils.py 几个常用的公共函数
+
+--------------------------
+另外几个脚本的说明:
+TestClient.py 尝试向ReqListener.py发消息, 看ReqListener是否还活着
+kline.py抓取k线信息, 暂时没蛋用
+monitoring_req_listener.py 监控ReqListener是否在正常写库
+print_nohup_file.py nohup运行脚本时, 监控 xxx.nohup.out文件, 若有新信息, 就会打印到屏幕上, 用法是 ./print_nohup_file.py your.nohup.out.file.name
+
+
+
+
+==============2016.01.31修改======================================
+把ReqListener.py修改为抓取k线数据, 而不是ticker数据
+策略在bollin线基础上, 添加以下几条:
+	1. macd的柱线bar从正突破为负时, 先不清仓, 且3个柱线内不交易. 在形成加速向下趋势时不交易. 加速的意思是
+		continous_red >= 3
+		(bar[-1]-bar[-2]) <0
+		(bar[-2]-bar[-3]) <0
+		(bar[-1]-bar[-2]) < (bar[-2]-bar[-3])
+		current_bar < bar[-1]
+	2. 满仓时, 记录最后一次交易价格, 行情跌破该价格, 且此时价格在布林线内时, 清仓
+	//3. 跌破5倍标准差时, 清仓
