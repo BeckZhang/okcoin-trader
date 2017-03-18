@@ -25,7 +25,7 @@ def MACD(close_list):
 
 def MeanAndStd(num_list, p_list=0):
 	n = len(num_list)
-	if p_list==0 or len(p_list)==0:
+	if sum(p_list)==0 or len(p_list)==0:
 		p_list = [1.0/n] * n
 	else:
 		sum_p = sum(p_list)
